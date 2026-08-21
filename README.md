@@ -69,7 +69,7 @@ Everything else becomes a **warning flag** for downstream inspection:
 | product_brand | `dq_product_brand_flag` | NULL | `missing_product_brand` |
 | product_brand | `dq_product_brand_flag` | Mismatch with SKU-derived brand | `brand_mismatch` |
 | product_brand | `dq_product_brand_flag` | UFC sub-brand conflict | `brand_generalized` |
-| dates | `dq_date_flags` (array) | Missing dates, epoch defaults, future dates, receipt before transaction | (multiple flags per row possible) |
+| dates | `dq_date_flags` (array) | Missing dates, epoch defaults, future dates, transaction before receipt | (multiple flags per row possible) |
 | total_unit_price | `dq_price_flag` | Missing, negative, or zero | (flagged) |
 | quantity | `dq_quantity_flag` | Missing, non-integer, ≤ 0, suspiciously high | (flagged) |
 | unit_price | `dq_price_outlier_flag` | ±3 SD from this product's average **at this retailer** | `suspicious_high_price` / `suspicious_low_price` |
