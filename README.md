@@ -74,8 +74,6 @@ Everything else becomes a warning flag. Full reference:
 
 *Price outliers are compared within `(product_sku, retailer)`, not across all retailers — different stores legitimately price the same product differently, and comparing against everyone else's price made a store's genuinely correct price look wrong just because another store sold more of it.*
 
-> **Bug caught by monitoring, not by eye:** the join that attaches these per-`(product_sku, retailer)` stats back onto each transaction originally matched on `product_sku` alone. Since the stats table has one row *per retailer* for each SKU, every transaction of a product sold at more than one retailer matched all of that product's retailer-rows and got duplicated — one extra copy per extra retailer. It wasn't obvious from spot-checking individual rows (each duplicate still looked internally consistent — same price, same quantity, same date). It showed up as `transaction_details1` silver row count running noticeably higher than bronze in `dq_drop_rate_monitor`, which is exactly what that table is for. Fix: the join has to match on **both** `product_sku` and `retailer`, not `product_sku` alone.
-
 ## DQ Monitoring
 
 Separate from what Gold filters — these exist so flag volume and drop rate are visible over time, regardless of what any one Gold table decides to act on.
