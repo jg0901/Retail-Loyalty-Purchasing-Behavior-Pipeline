@@ -11,10 +11,13 @@ Source (Excel: Loyalty cardholders + Transaction Details) → Bronze (raw ingest
 
 ## Bronze Layer
 
-Two streaming tables reading from `/Volumes/week4grouphw/bronze/raw/`:
+Two streaming tables, each reading from its own subfolder in `/Volumes/week4grouphw/bronze/raw/`:
 
-- **`bronze.loyalty_cardholders1`** — Customer profiles from Loyalty cardholders sheet
-- **`bronze.transaction_details1`** — Purchase records from Transaction Details sheet
+- **`bronze.loyalty_cardholders1`** — Customer profiles from Loyalty cardholders sheet  
+  Source: `/Volumes/week4grouphw/bronze/raw/loyalty_cardholders/`
+  
+- **`bronze.transaction_details1`** — Purchase records from Transaction Details sheet  
+  Source: `/Volumes/week4grouphw/bronze/raw/transaction_details/`
 
 **Why Streaming Tables?** Auto Loader tracks which files have been ingested. When new files arrive, only new data is processed — no full recomputation. (Unlike materialized views, which recompute from scratch each refresh.)
 
