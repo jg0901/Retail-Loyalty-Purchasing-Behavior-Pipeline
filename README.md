@@ -1,124 +1,191 @@
 # Retail Loyalty Purchasing Behavior Pipeline
 
-A Bronze → Silver → Gold pipeline on Databricks Lakeflow, turning raw retail transaction and loyalty customer data into a business-ready table.
+A Bronze → Silver → Gold data quality pipeline on Databricks Lakeflow that transforms raw retail transaction and loyalty customer data into business-ready analytics tables.
 
 **Business question:** How does purchasing behavior differ by customer age group, retailer, product brand, and month?
 
-```
-Source (Excel: Loyalty cardholders + Transaction Details)
-   → Bronze  (raw, preserved as-is)
-   → Silver  (cleaned, deduplicated, flagged — nothing deleted unless it fails an ID/invariant check)
-   → Gold    (joined, filtered, aggregated for the business question)
-   → Dashboard
-```
+Source (Excel: Loyalty cardholders + Transaction Details) → Bronze (raw ingestion, preserved as-is) → Silver (cleaned, deduplicated, validated with DQ flags) → Gold (two tables: detail-level + pre-aggregated) → Dashboard
 
-## Bronze
 
-Two streaming tables, both reading from the same uploaded file in `/Volumes/week4grouphw/bronze/raw/`:
+---
 
-- `bronze.loyalty_cardholders1` — Loyalty cardholders sheet
-- `bronze.transaction_details1` — Transaction Details sheet
+## Bronze Layer
 
-**Streaming table**, not a materialized view, because the source is meant to grow over time. Auto Loader keeps track of which files it has already ingested, so when a new file lands in that volume path and the pipeline is re-run, only the new file gets picked up — old data isn't reprocessed. (A materialized view, by contrast, fully recomputes from scratch every refresh — that's why Gold and the DQ monitoring tables below use materialized views instead: they need to look across *all* the data at once for joins and aggregates, not just append new rows.)
+Two streaming tables reading from `/Volumes/week4grouphw/bronze/raw/`:
 
-**Trigger:** Triggered (manual), not continuous. The pipeline only updates when it's run again — nothing streams in automatically in the background. That's a normal setup for a batch-style workload like this one.
+- **`bronze.loyalty_cardholders1`** — Customer profiles from Loyalty cardholders sheet
+- **`bronze.transaction_details1`** — Purchase records from Transaction Details sheet
 
-## Silver
+**Why Streaming Tables?** Auto Loader tracks which files have been ingested. When new files arrive, only new data is processed — no full recomputation. (Unlike materialized views, which recompute from scratch each refresh.)
 
-Both tables follow the same shape: **Deduplicate → Clean/Cast → Validate → Flag.** (Loyalty cardholders adds an Age Calculation step in between.)
+**Trigger:** Manual (triggered mode). Pipeline updates only when explicitly run.
 
-**Core philosophy: flag almost everything, drop almost nothing.** A flagged row still exists in Silver with all its original context intact — Gold decides later what's actually disqualifying for the business question at hand, not Silver.
+---
 
-Rows are only dropped in Silver when there's no other way to identify or trust the record:
+## Silver Layer
 
-| Table | Dropped when | Why |
+**Philosophy: Flag everything, drop only critical issues.**
+
+Both tables follow: **Deduplicate → Clean/Cast → Validate → Flag**
+
+Rows are flagged for data quality issues but **kept in Silver** with full context intact. Gold decides what's actually disqualifying for business analysis — Silver preserves everything possible.
+
+### Drop Conditions (Constraint-Based)
+
+Rows are **only dropped** when there's no way to identify or trust the record:
+
+| Table | Dropped when | Rationale |
 |---|---|---|
-| `loyalty_cardholders` | `user_id` is NULL | Birthday and registered date are meaningless without knowing who they belong to — no other unique identifier exists in this table. |
-| `transaction_details` | `customer_id`, `transaction_id`, `receipt_date`, and `transaction_date` are **all** missing at once | Nothing left to trace the row back to a real transaction. |
-| `transaction_details` | `total_unit_price` **and** `quantity` are **both** negative at the same time | A real return only reverses one side of a sale, never both — this combination has no legitimate explanation. |
+| `loyalty_cardholders` | `user_id` IS NULL | No way to identify who this profile belongs to |
+| `transaction_details` | `customer_id`, `transaction_id`, and **both dates** are ALL NULL | Insufficient identity — can't trace back to a real transaction |
+| `transaction_details` | `quantity` < 0 **AND** `total_unit_price` < 0 (both negative) | Possible data corruption — returns/refunds only reverse one of these, never both |
 
-*(This is a `DROP ROW` constraint, not `FAIL UPDATE` — the offending row is excluded and the pipeline keeps running, rather than halting the whole update. Chosen deliberately over a hard stop: a double-negative row still gets caught and removed every time it occurs, without a single occurrence taking down the entire refresh.)*
+### Data Quality Flags
 
-Everything else becomes a warning flag. Full reference:
+Everything else becomes a **warning flag** for downstream inspection:
 
-**`loyalty_cardholders1`**
+**`loyalty_cardholders1` Flags:**
 
-| Column | Flag | Condition | Value |
+| Column | Flag Column | Condition | Flag Value |
 |---|---|---|---|
 | birthday | `dq_birthday_flag` | NULL | `invalid_or_missing` |
-| birthday | `dq_birthday_flag` | after today | `future_date` |
-| birthday | `dq_birthday_flag` | before 1920-01-01 | `implausible_year` |
+| birthday | `dq_birthday_flag` | Future date | `future_date` |
+| birthday | `dq_birthday_flag` | Before 1920 | `implausible_year` |
 | registered_date | `dq_registered_date_flag` | NULL | `invalid_or_missing` |
-| registered_date | `dq_registered_date_flag` | = 1970-01-01 | `suspicious_epoch_default_date` |
-| registered_date | `dq_registered_date_flag` | after now | `future_date` |
+| registered_date | `dq_registered_date_flag` | Epoch default (1970-01-01) | `suspicious_epoch_default_date` |
+| registered_date | `dq_registered_date_flag` | Future date | `future_date` |
 | age | `dq_age_flag` | NULL | `invalid_or_missing` |
 | age | `dq_age_flag` | > 100 | `over_100` |
 | age | `dq_age_flag` | < 18 | `under_18` |
 
-**`transaction_details1`**
+**`transaction_details1` Flags:**
 
-| Column | Flag | Condition | Value |
+| Column | Flag Column | Condition | Flag Value |
 |---|---|---|---|
 | customer_id | `dq_customer_flag` | NULL | `possible_non_loyalty_member` |
-| transaction_id | `dq_transaction_id_flag` | missing | — |
-| receipt_number | `dq_receipt_number_flag` | missing or non-numeric | — |
+| transaction_id | `dq_transaction_id_flag` | NULL | `missing_transaction_id` |
+| receipt_number | `dq_receipt_number_flag` | Missing or non-numeric |`missing_receipt_number`, `non_numeric_receipt_number`  |
 | product_sku | `dq_product_sku_flag` | NULL | `missing_sku` |
-| product_brand | `dq_product_brand_flag` | missing | `missing_product_brand` |
-| product_brand | `dq_product_brand_flag` | SKU classifier didn't recognize a brand at all | not flagged — nothing to compare against yet, so it isn't treated as a mismatch |
-| product_brand | `dq_product_brand_flag` | original brand ≠ SKU-derived brand | `brand_mismatch` |
-| product_brand | `dq_product_brand_flag` | UFC vs. its own sub-brand (Golden/Hapi/Super Fiesta) | `brand_generalized` (not treated as a real conflict) |
-| receipt/transaction date | `dq_date_flags` (array — can hold more than one) | missing receipt date, missing transaction date, `1970-01-01` epoch default, future receipt/transaction date, transaction before receipt | one entry per issue found |
-| total_unit_price | `dq_price_flag` | missing, negative, or zero | — |
-| quantity | `dq_quantity_flag` | missing, non-integer, ≤ 0, or suspiciously high | — |
-| unit_price (derived) | `dq_price_outlier_flag` | more than ±3 SD from this **specific product at this specific retailer's** own average | `suspicious_high_price` / `suspicious_low_price` |
+| product_brand | `dq_product_brand_flag` | NULL | `missing_product_brand` |
+| product_brand | `dq_product_brand_flag` | Mismatch with SKU-derived brand | `brand_mismatch` |
+| product_brand | `dq_product_brand_flag` | UFC sub-brand conflict | `brand_generalized` |
+| dates | `dq_date_flags` (array) | Missing dates, epoch defaults, future dates, receipt before transaction | (multiple flags per row possible) |
+| total_unit_price | `dq_price_flag` | Missing, negative, or zero | (flagged) |
+| quantity | `dq_quantity_flag` | Missing, non-integer, ≤ 0, suspiciously high | (flagged) |
+| unit_price | `dq_price_outlier_flag` | ±3 SD from this product's average **at this retailer** | `suspicious_high_price` / `suspicious_low_price` |
 
-*Price outliers are compared within `(product_sku, retailer)`, not across all retailers — different stores legitimately price the same product differently, and comparing against everyone else's price made a store's genuinely correct price look wrong just because another store sold more of it.*
+*Price outliers are detected within `(product_sku, retailer)` groups — different retailers legitimately price the same product differently.*
 
-## DQ Monitoring
+---
 
-Separate from what Gold filters — these exist so flag volume and drop rate are visible over time, regardless of what any one Gold table decides to act on.
+## Data Quality Monitoring
 
-| Table | What it tracks |
+**6 consolidated monitoring tables** track constraint violations and analytical exclusions across the pipeline:
+
+| Table | Purpose |
 |---|---|
-| `dq_drop_rate_monitor` | Bronze vs. Silver row counts and % dropped, per table |
-| `dq_health_check` | Fails the pipeline once the 10% drop-rate threshold is hit |
-| `dq_warnings_loyalty` | Summary counts of warning flags in `loyalty_cardholders` |
-| `dq_warnings_transactions` | Summary counts of warning flags in `transaction_details` |
-| `dq_silver_to_gold_exclusions_rows` | The actual rows excluded when building Gold |
-| `dq_silver_to_gold_exclusions` | Summary of how many rows were excluded, and why |
+| **`dq_pipeline_funnel`** | Complete Bronze → Silver → Gold funnel with row counts, duplicates, constraint drops (dual negatives, insufficient identity), and analytical exclusions |
+| **`dq_health_check`** | **FAILS pipeline** if Bronze → Silver drop rate ≥ 10% (5–10% warns) |
+| **`dq_warnings_loyalty`** | Warning flag counts for `loyalty_cardholders` |
+| **`dq_warnings_transactions`** | Warning flag counts for `transaction_details` |
+| **`dq_excluded_rows_all_stages`** | **Row-level inspection**: Every dropped/excluded row across Bronze → Silver → Gold with reason flags |
 
-**Stop conditions:**
-- **< 5% of rows dropped** → normal, no action
-- **5–10% dropped** → warning
-- **≥ 10% dropped** → pipeline fails via `dq_health_check`, requires investigation before trusting the run
+### Pipeline Health Thresholds
 
-## Gold
+| Drop Rate | Status | Action |
+|---|---|---|
+| < 5% | OK | Normal operation |
+| 5–10% | WARNING | Monitor closely |
+| ≥ 10% | **STOP** | Pipeline fails via `dq_health_check` constraint — investigate before trusting results |
 
-`gold` is scoped to **loyalty members only** — `age_group` can't exist without a loyalty profile, so a guest transaction can't meaningfully answer the "by age group" part of the business question. This means `total_revenue` in Gold represents loyalty-segment revenue, not company-wide revenue.
+---
 
-Rows are excluded from Gold when:
+## Gold Layer
 
-- `customer_id` is NULL (non-loyalty)
-- `quantity` is missing, negative, or zero
-- `total_unit_price` is missing or negative
-- `dq_date_flags` contains `missing_transaction_date`, `suspicious_epoch_default_date`, `future_receipt_date`, or `future_transaction_date` — these would put the row in the wrong month bucket, which directly corrupts a required dimension
+**Two-table strategy** for the business question:
 
-Rows are **kept** in Gold even when flagged, when the flag doesn't threaten anything Gold actually reports:
+### 1. `gold.loyalty_purchases` (Detail-Level)
+* **Granularity:** One row per product line item (transaction_id + product_sku)
+* **Purpose:** Flexible dashboard exploration, drill-downs, custom aggregations
+* **Use for:** Ad-hoc analysis, filtering on any dimension, transaction-level detail
 
-- `transaction_before_receipt` — internal inconsistency, doesn't affect which month the row belongs to
-- `missing_receipt_date` alone — Gold groups by `transaction_date`, not `receipt_date`, so this doesn't affect month bucketing
-- Brand issues, missing `transaction_id`, receipt number formatting — don't touch any of Gold's dimensions or metrics
+### 2. `gold.purchasing_behavior` (Pre-Aggregated)
+* **Granularity:** One row per `(age_group, retailer, product_brand, transaction_month)` combination
+* **Purpose:** Fast dashboard performance for the specific business question
+* **Pre-computed metrics:**
+  - `transaction_count` — Unique transactions
+  - `product_line_items` — Total line items
+  - `unique_customers` — Distinct customers
+  - `total_quantity_sold` — Total items sold
+  - `total_revenue` — Total revenue
+  - `avg_revenue_per_transaction` — Average transaction value
+  - `avg_items_per_transaction` — Average basket size
 
-**Still under review:** whether `dq_price_outlier_flag` rows should eventually be excluded too. For now they're kept and just monitored, since the detection method needs manual verification against a small dataset before trusting it to remove data automatically.
+### Scope & Exclusions
+
+**Gold is scoped to loyalty members only** — guest transactions (NULL `customer_id`) are excluded because age group analysis requires a loyalty profile. Revenue in Gold represents loyalty-segment revenue, not company-wide.
+
+**Rows are excluded from Gold when:**
+
+* `customer_id` IS NULL (non-loyalty transaction)
+* `quantity` is NULL, ≤ 0
+* `total_unit_price` is NULL or < 0
+* `dq_date_flags` contains any of:
+  - `missing_transaction_date`
+  - `suspicious_epoch_default_date`
+  - `future_receipt_date`
+  - `future_transaction_date`
+  
+  *(These would put the row in the wrong month bucket, corrupting a required dimension)*
+* `dq_price_outlier_flag` is set (under review — currently monitored but not excluded)
+
+**Rows are KEPT even when flagged if:**
+
+* `transaction_before_receipt` — internal inconsistency but doesn't affect month bucketing
+* `missing_receipt_date` alone — Gold groups by `transaction_date`, not `receipt_date`
+* Brand issues, missing `transaction_id`, receipt formatting — don't affect Gold dimensions or metrics
+
+---
+
+## Dashboard Recommendations
+
+### Suggested Visualizations
+
+1. **Monthly Revenue Trend by Age Group** (Line chart) — Shows seasonal patterns and which age groups drive revenue over time
+2. **Age Group vs Retailer Heatmap** — Affinity analysis: which age groups prefer which retailers
+3. **Top Brands by Age Group** (Stacked bar) — Brand preferences across generations
+4. **Average Transaction Value by Retailer & Age** (Grouped bar) — Which combinations drive higher-value purchases
+
+### Filter/Parameter Suggestions
+
+* **Time:** Date range, year selector, month-to-date toggle
+* **Segmentation:** Age group (multi-select), Retailer, Product brand (top N)
+* **Analysis:** Minimum transaction threshold, customer tenure buckets
+* **Metric toggle:** Switch between revenue, transaction count, unique customers, avg transaction value
+
+**Use `loyalty_purchases` for:** Drill-downs, customer-level analysis, flexible date granularity  
+**Use `purchasing_behavior` for:** Fast pre-computed aggregations at the right grain
+
+---
 
 ## Tech Stack
 
-Databricks Lakeflow Declarative Pipelines (`STREAMING TABLE`, `MATERIALIZED VIEW`, `CONSTRAINT ... EXPECT`), Databricks SQL, Unity Catalog. Source ingested via `read_files(..., format => 'excel')`.
+* **Platform:** Databricks Lakeflow Spark Declarative Pipelines
+* **Storage:** Unity Catalog (Delta tables)
+* **Ingestion:** Auto Loader (`read_files(..., format => 'excel')`)
+* **Monitoring:** Constraint-based data quality (`CONSTRAINT ... EXPECT`)
+* **Languages:** Databricks SQL
+
+---
 
 ## Open Items
 
-- [ ] Expand SKU regex patterns as new, unrecognized SKUs show up — the classifier won't catch every brand/type/weight pattern on day one by design; check `WHERE brand_from_sku IS NULL OR product_type IS NULL` periodically to find candidates for new rules
-- [ ] Finish reviewing flagged price outliers; decide on detection method (mean/SD vs. median-ratio) and whether to exclude from Gold
-- [ ] Pick a final cutoff for implausibly young ages in the loyalty roster
+- [ ] Expand SKU regex patterns as new unrecognized SKUs appear — check `WHERE brand_from_sku IS NULL` periodically to find candidates for new rules
+- [ ] Finalize price outlier detection method (mean/SD vs. median-ratio) and decide whether to exclude from Gold
+- [ ] Establish final cutoff for implausibly young ages in loyalty roster
+- [ ] Validate that `purchasing_behavior` aggregations match dashboard requirements before finalizing pre-computation grain
 
+---
 
+## Repository Structure
+/Week4HW/ ├── transformations/ │ ├── Bronze.sql # Raw ingestion (streaming tables) │ ├── Silver.sql # Cleaning, deduplication, validation │ ├── gold.sql # Business analytics tables │ └── dq_monitoring.sql # Data quality monitoring views └── /Volumes/week4grouphw/bronze/raw/ └── [source Excel files]
