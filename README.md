@@ -133,6 +133,7 @@ Everything else becomes a **warning flag** for downstream inspection:
 * `customer_id` IS NULL (non-loyalty transaction)
 * `quantity` is NULL, ≤ 0
 * `total_unit_price` is NULL or < 0
+* `product_sku` is NULL
 * `dq_date_flags` contains any of:
   - `missing_transaction_date`
   - `suspicious_epoch_default_date`
