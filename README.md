@@ -148,28 +148,6 @@ Everything else becomes a **warning flag** for downstream inspection:
 * `transaction_before_receipt` — internal inconsistency but doesn't affect month bucketing
 * `missing_receipt_date` alone — Gold groups by `transaction_date`, not `receipt_date`
 * Brand issues, missing `transaction_id`, receipt formatting — don't affect Gold dimensions or metrics
-
----
-
-## Dashboard Recommendations
-
-### Suggested Visualizations
-
-1. **Monthly Revenue Trend by Age Group** (Line chart) — Shows seasonal patterns and which age groups drive revenue over time
-2. **Age Group vs Retailer Heatmap** — Affinity analysis: which age groups prefer which retailers
-3. **Top Brands by Age Group** (Stacked bar) — Brand preferences across generations
-4. **Average Transaction Value by Retailer & Age** (Grouped bar) — Which combinations drive higher-value purchases
-
-### Filter/Parameter Suggestions
-
-* **Time:** Date range, year selector, month-to-date toggle
-* **Segmentation:** Age group (multi-select), Retailer, Product brand (top N)
-* **Analysis:** Minimum transaction threshold, customer tenure buckets
-* **Metric toggle:** Switch between revenue, transaction count, unique customers, avg transaction value
-
-**Use `loyalty_purchases` for:** Drill-downs, customer-level analysis, flexible date granularity  
-**Use `purchasing_behavior` for:** Fast pre-computed aggregations at the right grain
-
 ---
 
 ## Tech Stack
